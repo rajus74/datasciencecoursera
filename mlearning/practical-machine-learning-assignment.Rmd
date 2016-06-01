@@ -1,0 +1,152 @@
+---
+title: 'Practical Machine Learning: Prediction Assignment'
+author: "Raju Shah"
+date: "May 30, 2016"
+output: word_document
+---
+---
+###Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks.
+
+###Data
+The data sets originated from :
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz40iHm7JQz
+
+###Goal
+For this project, we are given data from accelerometers on the belt, forearm, arm, and dumbell of 6 research study participants. Our training data consists of accelerometer data and a label identifying the quality of the activity the participant was doing. Our testing data consists of accelerometer data without the identifying label. Our goal is to predict the labels for the test set observations.
+We will also create a report describing how we built our model, how we used cross validation, what we think the expected out of sample error is, and why we made the choices we did. We will also use our prediction model to predict 20 different test cases.
+
+
+```{r}
+library(ggplot2)
+library(caret)
+library(randomForest)
+library(gbm)
+setwd("d:/coursera/datascience/08-practical-machine-learning/assignment")
+```
+
+### Load data 
+* Loading data.           
+* Remove near zero covariates and those with more than 80% missing values since these variables will not provide much power for prediction.       
+* Calculate correlations between each remaining feature to the response, `classe`. Use `spearman` rank based correlation because `classe` is a factor.                 
+* Plot the two features that have highest correlation with `classe` and color with `classe` to see if we can separate response based on these features.            
+
+```{r data}
+# loading data
+train_file <- "pml-training.csv"
+test_file <- "pml-testing.csv" 
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+if (!file.exists(train_file)){
+    download.file(train_url,train_file)    
+}
+
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists(test_file)){
+    download.file(test_url,test_file)  
+}
+
+training <- read.csv(train_file, na.strings = c("NA", "#DIV/0!", ""))
+testing  <- read.csv(test_file,  na.strings = c("NA", "#DIV/0!", ""))
+
+# remove near zero covariates
+nsv <- nearZeroVar(training, saveMetrics = T)
+training <- training[, !nsv$nzv]
+# remove variables with more than 80% missing values
+nav <- sapply(colnames(training), function(x) if(sum(is.na(training[, x])) > 0.8*nrow(training)){return(T)}else{return(F)})
+training <- training[, !nav]
+# calculate correlations
+cor <- abs(sapply(colnames(training[, -ncol(training)]), function(x) cor(as.numeric(training[, x]), as.numeric(training$classe), method = "spearman")))
+```
+
+The training set has __`r nrow(training)`__ samples and __`r ncol(training) - 1`__ potential predictors after filtering.          
+
+There doesn't seem to be any strong predictors that correlates with `classe` well, so linear regression model is probably not suitable in this case. Boosting and random forests algorithms may generate more robust predictions for our data.         
+
+### Boosting model
+* Fit model with boosting algorithm and 10-fold cross validation to predict `classe` with all other predictors.    
+* Plot accuracy of this model on the scale `[0.9, 1]`.        
+
+```{r boost,cache=TRUE}
+#partition the dataset into train and test set
+dataIndex <- createDataPartition(training$classe, p = 0.7, list = FALSE)
+training_set <- training[dataIndex,]
+testing_set <- training[-dataIndex,]
+modelcontrol <- trainControl(method = "cv", number = 10, verboseIter = FALSE)
+
+set.seed(123)
+boostFit <- train(classe ~ ., method = "gbm", data = training_set, verbose = FALSE, trControl = modelcontrol)
+```
+```{r boost_plot}
+boostFit
+plot(boostFit, ylim = c(0.9, 1))
+```
+
+The boosting algorithm generated a good model with __accuracy = 0.997__. 
+
+### Random forests model   
+* Fit model with random forests algorithm and 10-fold cross validation to predict `classe` with all other predictors.    
+* Plot accuracy of the model on the __same scale__ as boosting model.            
+
+```{r rf,cache=TRUE }
+set.seed(123)
+rfFit <- train(classe ~ ., method = "rf", data = training_set, trControl = modelcontrol)
+```
+```{r rf_plot}
+rfFit
+plot(rfFit, ylim = c(0.9, 1))
+```
+```{r rf_predict, echo = F}
+# use the random forest model fitted to predict classe in testing set
+rfFit_predicted <- predict(rfFit, newdata = testing_set)
+
+# show confusion matrix to get estimate of out-of-sample error from prediction
+confusionMatrix(testing_set$classe, rfFit_predicted)
+
+# use the boosting model fitted to predict classe in testing set
+boostFit_predicted <- predict(boostFit, newdata = testing_set)
+
+# show confusion matrix to get estimate of out-of-sample error from prediction
+confusionMatrix(testing_set$classe, boostFit_predicted)
+```
+
+```{r rf_imp, echo = F}
+imp <- varImp(rfFit)$importance
+imp$max <- apply(imp, 1, max)
+imp <- imp[order(imp$max, decreasing = T), ]
+```
+
+The random forests algorithm generated a very accurate model with __accuracy close to 1__. Compared to boosting model, this model generally has better performance in terms of accuracy as we see from the plots.                 
+### Out of Sample error
+```{r ooserror}
+## Calculate OOS Error
+missClass = function(values, predicted) {
+        sum(predicted != values) / length(values)
+}
+OOS_errRateRF = missClass(testing_set$classe, rfFit_predicted)
+OOS_errRateRF
+```
+
+### Final model and prediction   
+* Comparing model accuracy of the two models generated, random forests and boosting, random forests model has overall better accuracy. So, I'll use this model for prediction.         
+* The final random forests model contains 500 trees with 40 variables tried at each split. The five most important predictors in this model are `r rownames(imp)[1:5]`.                 
+* Estimated __out of sample error rate__ for the random forests model is __`r OOS_errRateRF `%__ as reported by the final model.            
+* Predict the test set and output results for automatic grader.     
+
+```{r prediction, message = F}
+# final model
+rfFit$finalModel
+# prediction
+prediction <- as.character(predict(rfFit, testing))
+```
+```{r results}
+# write prediction files
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("prediction/problem_id_", i, ".txt")
+    write.table(x[i], file = filename, quote = FALSE, row.names = FALSE, col.names = FALSE)
+  }
+}
+pml_write_files(prediction)
+```
